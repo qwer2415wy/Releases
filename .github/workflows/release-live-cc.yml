@@ -1,0 +1,139 @@
+name: release live-cc
+
+# Builds the live-CC installer from the private source branch and publishes it to
+# qwer2415wy/live-cc, because installed copies look for updates there.
+#
+# Logs here are public, so build output is written to a file that is never printed
+# or uploaded. To see why a build failed, run the same command on your own machine.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to publish, e.g. v1.5.1. Empty: build only"
+        type: string
+        required: false
+      rebuild_cuda:
+        description: "Recompile the CUDA whisper.dll instead of using the uploaded gpu-libs"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-live-cc
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      # Fail before a long build if publishing could not work.
+      - name: Check inputs
+        shell: pwsh
+        env:
+          HAS_TOKEN: ${{ secrets.LIVE_CC_RELEASE_TOKEN != '' }}
+        run: |
+          if ($env:VERSION) {
+            if ($env:VERSION -notmatch '^v\d+(\.\d+){1,2}$') { Write-Error 'version must look like v1.5.1'; exit 1 }
+            if ($env:HAS_TOKEN -ne 'true') { Write-Error 'secret LIVE_CC_RELEASE_TOKEN is not set (see README)'; exit 1 }
+          }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: qwer2415wy/tools
+          ref: live-cc
+          ssh-key: ${{ secrets.TOOLS_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download prebuilt gpu-libs
+        if: inputs.rebuild_cuda != true
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download gpu-libs --repo qwer2415wy/live-cc --pattern gpu-libs.zip
+          if ($LASTEXITCODE -ne 0) { Write-Error 'gpu-libs.zip is missing from the gpu-libs release of live-cc'; exit 1 }
+          Expand-Archive gpu-libs.zip -DestinationPath java
+          Remove-Item gpu-libs.zip
+
+      - name: Install CUDA Toolkit 13.3
+        if: inputs.rebuild_cuda == true
+        uses: Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d # v0.2.36
+        with:
+          cuda: "13.3.0"
+          cache: true
+
+      - name: Restore gpu-libs cache
+        if: inputs.rebuild_cuda == true
+        id: gpu-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: java\native\whisper-cuda-build\gpu-libs
+          key: gpu-libs-${{ runner.os }}-${{ hashFiles('java/native/build-cuda.ps1') }}
+
+      - name: Build CUDA whisper.dll (output hidden)
+        if: inputs.rebuild_cuda == true && steps.gpu-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          ./java/native/build-cuda.ps1 *> "$env:RUNNER_TEMP\cuda.log"
+          if (-not $?) { Write-Error 'CUDA build failed'; exit 1 }
+
+      - name: Install WiX 3.14
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri 'https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314.exe' -OutFile wix314.exe
+          Start-Process -FilePath .\wix314.exe -ArgumentList '/quiet','/norestart' -Wait
+          Add-Content $env:GITHUB_PATH 'C:\Program Files (x86)\WiX Toolset v3.14\bin'
+
+      - name: Build installers (output hidden)
+        shell: pwsh
+        env:
+          GPU_LIBS_SRC: ${{ github.workspace }}\java\native\whisper-cuda-build\gpu-libs
+          # Gradle strips the leading v; empty falls back to its default version.
+          ORG_GRADLE_PROJECT_appVersion: ${{ inputs.version }}
+        run: |
+          if (Test-Path "$env:GPU_LIBS_SRC\whisper.dll") {
+            Copy-Item -Recurse -Force "$env:GPU_LIBS_SRC" "$env:GITHUB_WORKSPACE\java\gpu-libs"
+          }
+          Set-Location java
+          ./gradlew jpackage --no-daemon --console=plain *> "$env:RUNNER_TEMP\build.log"
+          if ($LASTEXITCODE -ne 0) { Write-Error 'build failed'; exit 1 }
+
+      - name: Keep the installer (build only)
+        if: inputs.version == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-CC-installer
+          path: java/build/jpackage/installer/*.msi
+          retention-days: 7
+
+      - name: Publish to qwer2415wy/live-cc
+        if: inputs.version != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.LIVE_CC_RELEASE_TOKEN }}
+        run: |
+          $msi = (Get-ChildItem java\build\jpackage\installer\*.msi).FullName
+          if (-not $msi) { Write-Error 'no installer was built'; exit 1 }
+          $notes = @"
+          live-CC $env:VERSION 安裝檔（Windows x64，內含 CUDA GPU 支援）。
+
+          - 下載 live-CC-*.msi 安裝（SmartScreen 可能警告，選「詳細資訊 → 仍要執行」）
+          - 有 NVIDIA 顯卡（GTX 16xx / RTX 20xx 以上）且驅動夠新即可使用 GPU 加速
+          - 沒有 NVIDIA 顯卡的機器會自動使用 CPU 模式
+          "@
+          gh release view $env:VERSION --repo qwer2415wy/live-cc *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:VERSION $msi --repo qwer2415wy/live-cc --clobber
+          } else {
+            gh release create $env:VERSION $msi --repo qwer2415wy/live-cc --title "live-CC $env:VERSION" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { Write-Error 'publishing failed'; exit 1 }
