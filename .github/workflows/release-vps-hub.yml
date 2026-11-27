@@ -68,7 +68,13 @@ jobs:
       - name: Test (output hidden)
         run: |
           go vet ./... >"$RUNNER_TEMP/log" 2>&1 || { echo "go vet failed"; exit 1; }
-          go test -race ./... >"$RUNNER_TEMP/log" 2>&1 || { echo "go test failed"; exit 1; }
+          # On failure print names only: packages, tests and the number of races.
+          go test -race ./... >"$RUNNER_TEMP/log" 2>&1 || {
+            echo "go test failed"
+            grep -E '^[[:space:]]*--- FAIL: |^FAIL|^panic: test timed out' "$RUNNER_TEMP/log" | awk '{print $1, $2, $3}'
+            echo "data races: $(grep -c 'WARNING: DATA RACE' "$RUNNER_TEMP/log")"
+            exit 1
+          }
           shellcheck install/install.sh >"$RUNNER_TEMP/log" 2>&1 || { echo "shellcheck failed"; exit 1; }
       - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
         with:
