@@ -58,8 +58,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release download gpu-libs --repo qwer2415wy/live-cc --pattern gpu-libs.zip
-          if ($LASTEXITCODE -ne 0) { Write-Error 'gpu-libs.zip is missing from the gpu-libs release of live-cc'; exit 1 }
+          gh release download live-cc-gpu-libs --repo $env:GITHUB_REPOSITORY --pattern gpu-libs.zip
+          if ($LASTEXITCODE -ne 0) { Write-Error 'gpu-libs.zip is missing from the live-cc-gpu-libs release'; exit 1 }
           Expand-Archive gpu-libs.zip -DestinationPath java
           Remove-Item gpu-libs.zip
 
