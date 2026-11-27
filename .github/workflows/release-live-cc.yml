@@ -1,7 +1,7 @@
 name: release live-cc
 
-# Builds the live-CC installer from the private source branch and publishes it to
-# qwer2415wy/live-cc, because installed copies look for updates there.
+# Builds the live-CC installer from the private source branch and publishes it as
+# a release of this public repository, tagged live-cc-vX.Y.Z.
 #
 # Logs here are public, so build output is written to a file that is never printed
 # or uploaded. To see why a build failed, run the same command on your own machine.
@@ -27,18 +27,17 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 300
+    permissions:
+      contents: write
     env:
       VERSION: ${{ inputs.version }}
     steps:
       # Fail before a long build if publishing could not work.
       - name: Check inputs
         shell: pwsh
-        env:
-          HAS_TOKEN: ${{ secrets.LIVE_CC_RELEASE_TOKEN != '' }}
         run: |
-          if ($env:VERSION) {
-            if ($env:VERSION -notmatch '^v\d+(\.\d+){1,2}$') { Write-Error 'version must look like v1.5.1'; exit 1 }
-            if ($env:HAS_TOKEN -ne 'true') { Write-Error 'secret LIVE_CC_RELEASE_TOKEN is not set (see README)'; exit 1 }
+          if ($env:VERSION -and $env:VERSION -notmatch '^v\d+(\.\d+){1,2}$') {
+            Write-Error 'version must look like v1.5.1'; exit 1
           }
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -115,14 +114,15 @@ jobs:
           path: java/build/jpackage/installer/*.msi
           retention-days: 7
 
-      - name: Publish to qwer2415wy/live-cc
+      - name: Publish
         if: inputs.version != ''
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.LIVE_CC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $msi = (Get-ChildItem java\build\jpackage\installer\*.msi).FullName
           if (-not $msi) { Write-Error 'no installer was built'; exit 1 }
+          $tag = "live-cc-$env:VERSION"
           $notes = @"
           live-CC $env:VERSION 安裝檔（Windows x64，內含 CUDA GPU 支援）。
 
@@ -130,10 +130,10 @@ jobs:
           - 有 NVIDIA 顯卡（GTX 16xx / RTX 20xx 以上）且驅動夠新即可使用 GPU 加速
           - 沒有 NVIDIA 顯卡的機器會自動使用 CPU 模式
           "@
-          gh release view $env:VERSION --repo qwer2415wy/live-cc *> $null
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:VERSION $msi --repo qwer2415wy/live-cc --clobber
+            gh release upload $tag $msi --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $env:VERSION $msi --repo qwer2415wy/live-cc --title "live-CC $env:VERSION" --notes $notes
+            gh release create $tag $msi --repo $env:GITHUB_REPOSITORY --title "live-CC $env:VERSION" --notes $notes
           }
           if ($LASTEXITCODE -ne 0) { Write-Error 'publishing failed'; exit 1 }
